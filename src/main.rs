@@ -65,16 +65,15 @@ fn display_centered_line(
     let diff = max_width.max(width) - max_width.min(width);
     let half_diff = diff / 2;
 
-    let segments = if width < max_width {
+    if width < max_width {
         writer.queue(MoveRight(half_diff as u16))?;
-        &segment_buffer[..]
+        for segment in segment_buffer {
+            writer.queue(Print(segment))?;
+        }
     } else {
-        let half_diff = diff / 2;
-        &segment_buffer[half_diff..width - diff]
-    };
-
-    for segement in segments {
-        writer.queue(Print(segement))?;
+        for segment in segment_buffer.into_iter().skip(diff / 2).take(max_width) {
+            writer.queue(Print(segment))?;
+        }
     }
 
     Ok(())
