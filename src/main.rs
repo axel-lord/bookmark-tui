@@ -1,6 +1,10 @@
+#![feature(return_position_impl_trait_in_trait)]
+#![allow(incomplete_features)]
+
 use std::{
     fs::File,
     io::{self, stdout, BufRead, BufReader, Seek, SeekFrom, Write},
+    iter,
     path::PathBuf,
     result,
 };
@@ -76,16 +80,24 @@ fn display_centered_line(
     Ok(())
 }
 
-fn line_iter(buf_read: &mut impl BufRead) -> impl '_ + Iterator<Item = Result<String>> {
-    (0..).map(|_| {
+fn line_iter(buf_read: &mut (impl BufRead + ?Sized)) -> impl '_ + Iterator<Item = Result<String>> {
+    iter::from_fn(|| {
         let mut buf = String::new();
-        if let Err(e) = buf_read.read_line(&mut buf) {
-            Err(Error::from(e))
-        } else {
-            Ok(buf)
+        match buf_read.read_line(&mut buf) {
+            Err(e) => Some(Err(Error::from(e))),
+            Ok(0) => None,
+            Ok(_) => Some(Ok(buf)),
         }
     })
 }
+
+trait BufReadRefLineExt: BufRead {
+    fn ref_lines(&mut self) -> impl '_ + Iterator<Item = Result<String>> {
+        line_iter(self)
+    }
+}
+
+impl<T: BufRead> BufReadRefLineExt for T {}
 
 fn main() -> Result<()> {
     let Cli { input } = Cli::parse();
@@ -97,7 +109,7 @@ fn main() -> Result<()> {
 
     let mut display = |scroll_pos, size| -> Result<()> {
         file.seek(SeekFrom::Start(start_pos))?;
-        display_centered(stdout(), line_iter(&mut file).skip(scroll_pos), size)?;
+        display_centered(stdout(), file.ref_lines().skip(scroll_pos), size)?;
         Ok(())
     };
 
