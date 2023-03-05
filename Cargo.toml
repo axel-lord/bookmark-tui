@@ -10,3 +10,4 @@ clap = { version = "4.1.8", features = ["derive"] }
 crossterm = { version = "0.26.1", features = ["event-stream"]}
 tap = "1.0.1"
 thiserror = "1.0.38"
+unicode-segmentation = "1.10.1"
