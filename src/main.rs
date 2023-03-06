@@ -1,10 +1,7 @@
-#![feature(return_position_impl_trait_in_trait)]
-#![allow(incomplete_features)]
-
 use std::{
     fs::File,
     io::{self, stdout, BufRead, BufReader, Seek, SeekFrom, Write},
-    iter,
+    iter::{from_fn, once_with, FusedIterator},
     path::PathBuf,
     result,
 };
@@ -39,15 +36,9 @@ fn display_centered(
     lines: impl IntoIterator<Item = Result<String>>,
     (term_width, term_height): (u16, u16),
 ) -> Result<()> {
-    writer
-        .queue(EnterAlternateScreen)?
-        .queue(Clear(ClearType::All))?;
-
     for (row, line) in lines.into_iter().take(term_height as usize).enumerate() {
         display_centered_line(&mut writer, &line?, row as u16, term_width as usize)?;
     }
-
-    writer.flush()?;
 
     Ok(())
 }
@@ -58,15 +49,20 @@ fn display_centered_line(
     row: u16,
     max_width: usize,
 ) -> Result<()> {
-    writer.queue(MoveTo(0, row))?;
-    let segment_buffer = Vec::with_capacity(max_width).tap_mut(|v| v.extend(line.graphemes(true)));
+    writer
+        .queue(MoveTo(0, row))?
+        .queue(Clear(ClearType::CurrentLine))?;
+
+    // Setting capacity to string length should guarantee only 1 allocation since there should not
+    // be able to be more grapheme clusters than bytes.
+    let segment_buffer = Vec::with_capacity(line.len()).tap_mut(|v| v.extend(line.graphemes(true)));
 
     let width = segment_buffer.len();
     let diff = max_width.max(width) - max_width.min(width);
-    let half_diff = diff / 2;
 
+    // Text gets either padded or cut depending on length.
     if width < max_width {
-        writer.queue(MoveRight(half_diff as u16))?;
+        writer.queue(MoveRight(diff as u16 / 2))?;
         for segment in segment_buffer {
             writer.queue(Print(segment))?;
         }
@@ -76,23 +72,45 @@ fn display_centered_line(
         }
     }
 
+    // Flush per line.
+    writer.flush()?;
+
     Ok(())
 }
 
-fn line_iter(buf_read: &mut (impl BufRead + ?Sized)) -> impl '_ + Iterator<Item = Result<String>> {
-    iter::from_fn(|| {
-        let mut buf = String::new();
-        match buf_read.read_line(&mut buf) {
-            Err(e) => Some(Err(Error::from(e))),
-            Ok(0) => None,
-            Ok(_) => Some(Ok(buf)),
-        }
-    })
+enum RefLineIter<'a, R: ?Sized> {
+    Dead,
+    Alive(&'a mut R),
 }
 
+impl<'a, R> Iterator for RefLineIter<'a, R>
+where
+    R: BufRead + ?Sized,
+{
+    type Item = Result<String>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Self::Alive(reader) = self {
+            let mut buf = String::new();
+            match reader.read_line(&mut buf) {
+                Err(e) => Some(Err(Error::from(e))),
+                Ok(0) => {
+                    *self = Self::Dead;
+                    None
+                }
+                Ok(_) => Some(Ok(buf)),
+            }
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a, R> FusedIterator for RefLineIter<'a, R> where R: BufRead + ?Sized {}
+
 trait BufReadRefLineExt: BufRead {
-    fn ref_lines(&mut self) -> impl '_ + Iterator<Item = Result<String>> {
-        line_iter(self)
+    fn ref_lines(&mut self) -> RefLineIter<'_, Self> {
+        RefLineIter::Alive(self)
     }
 }
 
@@ -103,12 +121,25 @@ fn main() -> Result<()> {
 
     terminal::enable_raw_mode()?;
 
+    stdout()
+        .queue(EnterAlternateScreen)?
+        .queue(Clear(ClearType::All))?
+        .flush()?;
+
     let mut file = File::open(&input)?.pipe(BufReader::new);
     let start_pos = file.stream_position()?;
 
     let mut display = |scroll_pos, size| -> Result<()> {
         file.seek(SeekFrom::Start(start_pos))?;
-        display_centered(stdout(), file.ref_lines().skip(scroll_pos), size)?;
+        display_centered(
+            stdout(),
+            once_with(|| Ok(String::new())).chain(
+                file.ref_lines()
+                    .skip(scroll_pos)
+                    .chain(from_fn(|| Some(Ok(String::new())))),
+            ),
+            size,
+        )?;
         Ok(())
     };
 
