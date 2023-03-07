@@ -1,17 +1,20 @@
 use std::{
     fs::File,
     io::{self, stdout, BufRead, BufReader, Seek, SeekFrom, Write},
-    iter::{from_fn, once_with, FusedIterator},
+    iter::{self, FusedIterator},
     path::PathBuf,
     result,
 };
 
 use clap::Parser;
 use crossterm::{
-    cursor::{MoveRight, MoveTo},
+    cursor::{Hide, MoveRight, MoveTo, Show},
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     style::Print,
-    terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        self, Clear, ClearType, DisableLineWrap, EnableLineWrap, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
     QueueableCommand,
 };
 use tap::{Pipe, Tap};
@@ -36,14 +39,21 @@ fn display_centered(
     lines: impl IntoIterator<Item = Result<String>>,
     (term_width, term_height): (u16, u16),
 ) -> Result<()> {
-    for (row, line) in lines.into_iter().take(term_height as usize).enumerate() {
-        display_centered_line(&mut writer, &line?, row as u16, term_width as usize)?;
+    writer.queue(Clear(ClearType::All))?;
+
+    for (row, line) in lines
+        .into_iter()
+        .chain(iter::once_with(String::new).map(Ok))
+        .take(term_height as usize)
+        .enumerate()
+    {
+        queue_centered_line(&mut writer, &line?, row as u16, term_width as usize)?;
     }
 
     Ok(())
 }
 
-fn display_centered_line(
+fn queue_centered_line(
     mut writer: impl Write,
     line: &str,
     row: u16,
@@ -55,24 +65,28 @@ fn display_centered_line(
 
     // Setting capacity to string length should guarantee only 1 allocation since there should not
     // be able to be more grapheme clusters than bytes.
-    let segment_buffer = Vec::with_capacity(line.len()).tap_mut(|v| v.extend(line.graphemes(true)));
+    let segment_buffer = Vec::with_capacity(line.len())
+        .tap_mut(|v| v.extend(line.grapheme_indices(true).map(|(i, _)| i)));
 
     let width = segment_buffer.len();
     let diff = max_width.max(width) - max_width.min(width);
 
     // Text gets either padded or cut depending on length.
     if width < max_width {
-        writer.queue(MoveRight(diff as u16 / 2))?;
-        for segment in segment_buffer {
-            writer.queue(Print(segment))?;
-        }
+        writer
+            .queue(MoveRight(diff as u16 / 2))?
+            .queue(Print(line))?;
     } else {
-        for segment in segment_buffer.into_iter().skip(diff / 2).take(max_width) {
-            writer.queue(Print(segment))?;
-        }
+        // segment_buffer
+        //     .into_iter()
+        //     .skip(diff / 2)
+        //     .take(max_width)
+        //     .try_fold(&mut writer, |writer, segment| writer.queue(Print(segment)))?;
+        writer.queue(Print(
+            &line[segment_buffer[diff / 2]..segment_buffer[max_width - diff / 2]],
+        ))?;
     }
 
-    // Flush per line.
     writer.flush()?;
 
     Ok(())
@@ -121,9 +135,13 @@ fn main() -> Result<()> {
 
     terminal::enable_raw_mode()?;
 
-    stdout()
+    let mut writer = stdout();
+
+    writer
         .queue(EnterAlternateScreen)?
         .queue(Clear(ClearType::All))?
+        .queue(Hide)?
+        .queue(DisableLineWrap)?
         .flush()?;
 
     let mut file = File::open(&input)?.pipe(BufReader::new);
@@ -131,15 +149,7 @@ fn main() -> Result<()> {
 
     let mut display = |scroll_pos, size| -> Result<()> {
         file.seek(SeekFrom::Start(start_pos))?;
-        display_centered(
-            stdout(),
-            once_with(|| Ok(String::new())).chain(
-                file.ref_lines()
-                    .skip(scroll_pos)
-                    .chain(from_fn(|| Some(Ok(String::new())))),
-            ),
-            size,
-        )?;
+        display_centered(&mut writer, file.ref_lines().skip(scroll_pos), size)?;
         Ok(())
     };
 
@@ -189,6 +199,8 @@ fn main() -> Result<()> {
     stdout()
         .queue(Clear(ClearType::All))?
         .queue(LeaveAlternateScreen)?
+        .queue(Show)?
+        .queue(EnableLineWrap)?
         .flush()?;
 
     terminal::disable_raw_mode()?;
