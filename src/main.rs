@@ -77,14 +77,7 @@ fn queue_centered_line(
             .queue(MoveRight(diff as u16 / 2))?
             .queue(Print(line))?;
     } else {
-        // segment_buffer
-        //     .into_iter()
-        //     .skip(diff / 2)
-        //     .take(max_width)
-        //     .try_fold(&mut writer, |writer, segment| writer.queue(Print(segment)))?;
-        writer.queue(Print(
-            &line[segment_buffer[diff / 2]..segment_buffer[max_width - diff / 2]],
-        ))?;
+        writer.queue(Print(&line[segment_buffer[diff / 2]..]))?;
     }
 
     writer.flush()?;
@@ -130,19 +123,40 @@ trait BufReadRefLineExt: BufRead {
 
 impl<T: BufRead> BufReadRefLineExt for T {}
 
+struct TermGuard;
+
+impl TermGuard {
+    fn new() -> Result<Self> {
+        terminal::enable_raw_mode()?;
+        stdout()
+            .queue(EnterAlternateScreen)?
+            .queue(Clear(ClearType::All))?
+            .queue(Hide)?
+            .queue(DisableLineWrap)?
+            .flush()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for TermGuard {
+    fn drop(&mut self) {
+        let mut out = stdout();
+
+        let _ = out.queue(Clear(ClearType::All));
+        let _ = out.queue(LeaveAlternateScreen);
+        let _ = out.queue(Show);
+        let _ = out.queue(EnableLineWrap);
+        let _ = out.flush();
+
+        let _ = terminal::disable_raw_mode();
+    }
+}
+
 fn main() -> Result<()> {
     let Cli { input } = Cli::parse();
-
-    terminal::enable_raw_mode()?;
+    let _guard = TermGuard::new();
 
     let mut writer = stdout();
-
-    writer
-        .queue(EnterAlternateScreen)?
-        .queue(Clear(ClearType::All))?
-        .queue(Hide)?
-        .queue(DisableLineWrap)?
-        .flush()?;
 
     let mut file = File::open(&input)?.pipe(BufReader::new);
     let start_pos = file.stream_position()?;
@@ -195,15 +209,6 @@ fn main() -> Result<()> {
             _ => (),
         }
     }
-
-    stdout()
-        .queue(Clear(ClearType::All))?
-        .queue(LeaveAlternateScreen)?
-        .queue(Show)?
-        .queue(EnableLineWrap)?
-        .flush()?;
-
-    terminal::disable_raw_mode()?;
 
     Ok(())
 }
